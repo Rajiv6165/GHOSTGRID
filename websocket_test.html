@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WebSocket Test</title>
+</head>
+<body>
+    <h1>WebSocket Connection Test</h1>
+    <div id="status">Not connected</div>
+    <button onclick="connectWebSocket()">Connect WebSocket</button>
+    <button onclick="sendMessage()">Send Test Message</button>
+    <div id="messages"></div>
+
+    <script>
+        let ws = null;
+
+        function connectWebSocket() {
+            const statusDiv = document.getElementById('status');
+            const messagesDiv = document.getElementById('messages');
+            
+            // Test with the real board ID
+            const boardId = 'f35bc4ca-c831-468a-a2ff-6224184dff61';
+            ws = new WebSocket(`ws://127.0.0.1:8000/ws/board/${boardId}/`);
+            
+            ws.onopen = function(event) {
+                statusDiv.innerHTML = '<span style="color: green;">Connected!</span>';
+                messagesDiv.innerHTML += '<p>WebSocket connection established</p>';
+                console.log('WebSocket connected');
+            };
+            
+            ws.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                messagesDiv.innerHTML += `<p>Received: ${JSON.stringify(data)}</p>`;
+                console.log('Message received:', data);
+            };
+            
+            ws.onclose = function(event) {
+                statusDiv.innerHTML = '<span style="color: red;">Disconnected</span>';
+                messagesDiv.innerHTML += `<p>Connection closed: ${event.code} ${event.reason}</p>`;
+                console.log('WebSocket disconnected');
+            };
+            
+            ws.onerror = function(error) {
+                statusDiv.innerHTML = '<span style="color: red;">Error occurred</span>';
+                messagesDiv.innerHTML += `<p>Error: ${error}</p>`;
+                console.error('WebSocket error:', error);
+            };
+        }
+
+        function sendMessage() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                const message = JSON.stringify({type: 'test', content: 'Hello WebSocket'});
+                ws.send(message);
+                document.getElementById('messages').innerHTML += `<p>Sent: ${message}</p>`;
+            } else {
+                document.getElementById('messages').innerHTML += '<p>Not connected</p>';
+            }
+        }
+    </script>
+</body>
+</html>
