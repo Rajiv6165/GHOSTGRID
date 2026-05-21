@@ -1,19 +1,27 @@
 #!/bin/bash
 set -e
 
-# Wait for PostgreSQL to be ready
-echo "Waiting for PostgreSQL to be ready..."
-while ! nc -z "$POSTGRES_HOST" 5432; do
-  sleep 1
-done
-echo "PostgreSQL is ready!"
+# Wait for PostgreSQL to be ready if POSTGRES_HOST is specified
+if [ -n "$POSTGRES_HOST" ]; then
+  echo "Waiting for PostgreSQL to be ready..."
+  while ! nc -z "$POSTGRES_HOST" 5432; do
+    sleep 1
+  done
+  echo "PostgreSQL is ready!"
+else
+  echo "POSTGRES_HOST is not set, skipping PostgreSQL health check (using SQLite)..."
+fi
 
-# Wait for Redis to be ready
-echo "Waiting for Redis to be ready..."
-while ! nc -z "$REDIS_HOST" 6379; do
-  sleep 1
-done
-echo "Redis is ready!"
+# Wait for Redis to be ready if REDIS_HOST is specified
+if [ -n "$REDIS_HOST" ]; then
+  echo "Waiting for Redis to be ready..."
+  while ! nc -z "$REDIS_HOST" 6379; do
+    sleep 1
+  done
+  echo "Redis is ready!"
+else
+  echo "REDIS_HOST is not set, skipping Redis health check (using in-memory channel layer)..."
+fi
 
 # Run Django migrations
 echo "Running Django migrations..."

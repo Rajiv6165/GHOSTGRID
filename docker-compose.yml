@@ -44,6 +44,7 @@ services:
       DJANGO_SETTINGS_MODULE: ghostgrid.settings
       SECRET_KEY: "django-insecure-docker-secret-key-change-in-production"
       DEBUG: "False"
+      GEMINI_API_KEY: "AIzaSyAVPs4z1SU6GsBKozMmvJd1nIlcgAEtSlo"
     depends_on:
       db:
         condition: service_healthy
@@ -65,7 +66,7 @@ services:
     depends_on:
       - backend
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3000"]
       interval: 30s
       timeout: 10s
       retries: 3

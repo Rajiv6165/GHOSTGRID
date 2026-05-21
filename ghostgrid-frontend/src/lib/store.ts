@@ -23,10 +23,12 @@ export interface Edge {
 
 export interface BoardState {
   boardId: string | null;
+  boardName: string | null;
   nodes: Node[];
   edges: Edge[];
   // Actions
   setBoardId: (id: string) => void;
+  setBoardName: (name: string | null) => void;
   setNodes: (nodes: Node[]) => void;
   setEdges: (edges: Edge[]) => void;
   addNode: (node: Node) => void;
@@ -39,10 +41,13 @@ export interface BoardState {
 
 export const useBoardStore = create<BoardState>((set, get) => ({
   boardId: null,
+  boardName: null,
   nodes: [],
   edges: [],
   
   setBoardId: (id) => set({ boardId: id }),
+  
+  setBoardName: (name) => set({ boardName: name }),
   
   setNodes: (nodes) => set({ nodes }),
   
@@ -73,6 +78,7 @@ export const useBoardStore = create<BoardState>((set, get) => ({
   
   resetBoard: () => set({
     boardId: null,
+    boardName: null,
     nodes: [],
     edges: []
   })

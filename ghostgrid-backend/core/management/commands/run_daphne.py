@@ -27,9 +27,11 @@ class Command(BaseCommand):
         )
         self.stdout.write('=' * 40)
         
+        interface = os.getenv('DAPHNE_HOST', '0.0.0.0')
+        
         server = Server(
             application=application,
-            endpoints=['tcp:port=8000:interface=127.0.0.1'],
+            endpoints=[f'tcp:port=8000:interface={interface}'],
             signal_handlers=True,
             http_timeout=60,
             websocket_timeout=86400,

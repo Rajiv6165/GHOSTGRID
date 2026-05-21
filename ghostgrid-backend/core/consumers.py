@@ -1,5 +1,6 @@
 import json
 import logging
+from django.core.serializers.json import DjangoJSONEncoder
 from channels.generic.websocket import AsyncWebsocketConsumer
 from channels.db import database_sync_to_async
 from django.core.exceptions import ValidationError
@@ -66,7 +67,7 @@ class BoardConsumer(AsyncWebsocketConsumer):
             self.board_group_name,
             {
                 'type': 'node_created',
-                'node': NodeSerializer(node).data
+                'node': self.to_primitives(NodeSerializer(node).data)
             }
         )
     
@@ -111,7 +112,7 @@ class BoardConsumer(AsyncWebsocketConsumer):
             self.board_group_name,
             {
                 'type': 'edge_created',
-                'edge': EdgeSerializer(edge).data
+                'edge': self.to_primitives(EdgeSerializer(edge).data)
             }
         )
     
@@ -123,78 +124,108 @@ class BoardConsumer(AsyncWebsocketConsumer):
         try:
             ai_result = ai_service.generate_system_architecture(prompt)
             
-            # Create nodes and edges in database
+            # Create nodes and edges in database with mapped IDs
             created_nodes = []
             created_edges = []
+            ai_id_to_db_id = {}
             
             for node_data in ai_result.get('nodes', []):
+                orig_id = node_data.get('id')
                 node = await self.create_ai_node(node_data)
-                created_nodes.append(NodeSerializer(node).data)
+                serialized_node = NodeSerializer(node).data
+                created_nodes.append(serialized_node)
+                if orig_id:
+                    ai_id_to_db_id[str(orig_id)] = str(serialized_node.get('id'))
             
             for edge_data in ai_result.get('edges', []):
-                edge = await self.create_ai_edge(edge_data)
-                created_edges.append(EdgeSerializer(edge).data)
+                orig_source = str(edge_data.get('source', ''))
+                orig_target = str(edge_data.get('target', ''))
+                
+                db_source = ai_id_to_db_id.get(orig_source)
+                db_target = ai_id_to_db_id.get(orig_target)
+                
+                if db_source and db_target:
+                    edge_data['source'] = db_source
+                    edge_data['target'] = db_target
+                    edge = await self.create_ai_edge(edge_data)
+                    created_edges.append(EdgeSerializer(edge).data)
+                else:
+                    logger.warning(f"Could not map AI edge source/target: {orig_source} -> {orig_target}")
             
             # Broadcast AI-generated content
             await self.channel_layer.group_send(
                 self.board_group_name,
                 {
                     'type': 'ai_generated',
-                    'nodes': created_nodes,
-                    'edges': created_edges
+                    'nodes': self.to_primitives(created_nodes),
+                    'edges': self.to_primitives(created_edges)
                 }
             )
             
         except Exception as e:
             # Handle AI generation errors
-            await self.send(text_data=json.dumps({
+            logger.error(f"Error in handle_ai_generate: {e}", exc_info=True)
+            await self.send_json({
                 'type': 'ai_error',
                 'error': str(e)
-            }))
+            })
+            
+    def to_primitives(self, data):
+        return json.loads(json.dumps(data, cls=DjangoJSONEncoder))
+
+    async def send_json(self, data):
+        await self.send(text_data=json.dumps(data, cls=DjangoJSONEncoder))
     
     # Event handlers for broadcasting
     async def node_created(self, event):
-        await self.send(text_data=json.dumps({
+        await self.send_json({
             'type': 'node_created',
             'node': event['node']
-        }))
+        })
     
     async def node_moved(self, event):
-        await self.send(text_data=json.dumps({
+        await self.send_json({
             'type': 'node_moved',
             'node_id': event['node_id'],
             'position': event['position']
-        }))
+        })
     
     async def node_deleted(self, event):
-        await self.send(text_data=json.dumps({
+        await self.send_json({
             'type': 'node_deleted',
             'node_id': event['node_id']
-        }))
+        })
     
     async def edge_created(self, event):
-        await self.send(text_data=json.dumps({
+        await self.send_json({
             'type': 'edge_created',
             'edge': event['edge']
-        }))
+        })
     
     async def ai_generated(self, event):
-        await self.send(text_data=json.dumps({
+        await self.send_json({
             'type': 'ai_generated',
             'nodes': event['nodes'],
             'edges': event['edges']
-        }))
+        })
     
     # Database operations (async)
     @database_sync_to_async
     def create_node(self, node_data):
         board = Board.objects.get(id=self.board_id)
+        position = node_data.get('position', {})
+        pos_x = node_data.get('position_x')
+        pos_y = node_data.get('position_y')
+        if pos_x is None:
+            pos_x = position.get('x', 0)
+        if pos_y is None:
+            pos_y = position.get('y', 0)
         return Node.objects.create(
             board=board,
             type=node_data.get('type', 'service'),
             data=node_data.get('data', {}),
-            position_x=node_data.get('position_x', 0),
-            position_y=node_data.get('position_y', 0)
+            position_x=pos_x,
+            position_y=pos_y
         )
     
     @database_sync_to_async
@@ -220,10 +251,12 @@ class BoardConsumer(AsyncWebsocketConsumer):
     @database_sync_to_async
     def create_edge(self, edge_data):
         board = Board.objects.get(id=self.board_id)
+        source_id = edge_data.get('source_node') or edge_data.get('source')
+        target_id = edge_data.get('target_node') or edge_data.get('target')
         return Edge.objects.create(
             board=board,
-            source_node_id=edge_data.get('source_node'),
-            target_node_id=edge_data.get('target_node'),
+            source_node_id=source_id,
+            target_node_id=target_id,
             data=edge_data.get('data', {})
         )
     
@@ -238,43 +271,48 @@ class BoardConsumer(AsyncWebsocketConsumer):
         )
     
     @database_sync_to_async
-    def send_board_state(self):
+    def get_board_data(self):
+        board = Board.objects.get(id=self.board_id)
+        nodes = Node.objects.filter(board=board)
+        edges = Edge.objects.filter(board=board)
+        logger.info(f"Found board {board.id} with {nodes.count()} nodes and {edges.count()} edges")
+        return {
+            'board': {
+                'id': str(board.id),
+                'name': board.name
+            },
+            'nodes': NodeSerializer(nodes, many=True).data,
+            'edges': EdgeSerializer(edges, many=True).data
+        }
+
+    async def send_board_state(self):
         """Send current board state to the connected client"""
         logger.info(f"Attempting to send board state for board: {self.board_id}")
         try:
-            # Try to get existing board
-            board = Board.objects.get(id=self.board_id)
-            nodes = Node.objects.filter(board=board)
-            edges = Edge.objects.filter(board=board)
-            
-            logger.info(f"Found board {board.id} with {nodes.count()} nodes and {edges.count()} edges")
-            
-            self.send(text_data=json.dumps({
+            board_data = await self.get_board_data()
+            await self.send_json({
                 'type': 'board_state',
-                'board': {
-                    'id': str(board.id),
-                    'name': board.name
-                },
-                'nodes': NodeSerializer(nodes, many=True).data,
-                'edges': EdgeSerializer(edges, many=True).data
-            }))
+                'board': board_data['board'],
+                'nodes': board_data['nodes'],
+                'edges': board_data['edges']
+            })
         except Board.DoesNotExist:
             # Board doesn't exist yet, send empty state
             logger.info(f"Board {self.board_id} not found, sending empty state")
-            self.send(text_data=json.dumps({
+            await self.send_json({
                 'type': 'board_state',
                 'board': None,
                 'nodes': [],
                 'edges': [],
                 'message': 'Board not found, starting with empty state'
-            }))
+            })
         except ValidationError as e:
             # Handle UUID validation errors for non-UUID board IDs
             logger.warning(f"Invalid board ID format: {self.board_id}, sending empty state")
-            self.send(text_data=json.dumps({
+            await self.send_json({
                 'type': 'board_state',
                 'board': None,
                 'nodes': [],
                 'edges': [],
                 'message': 'Invalid board ID format, starting with empty state'
-            }))
+            })

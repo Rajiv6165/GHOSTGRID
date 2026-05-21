@@ -1,11 +1,40 @@
 import { useState, useEffect, useRef } from 'react';
-import { useBoardStore } from '../lib/store';
+import { useBoardStore, Node, Edge } from '../lib/store';
+
+const mapBackendNode = (node: any): Node => {
+  if (node.position && typeof node.position.x === 'number') {
+    return node;
+  }
+  return {
+    id: String(node.id),
+    type: node.type,
+    position: {
+      x: node.position_x ?? 0,
+      y: node.position_y ?? 0
+    },
+    data: node.data || {}
+  };
+};
+
+const mapBackendEdge = (edge: any): Edge => {
+  if (edge.source && edge.target) {
+    return edge;
+  }
+  return {
+    id: String(edge.id),
+    source: String(edge.source_node || edge.source),
+    target: String(edge.target_node || edge.target),
+    data: edge.data || {}
+  };
+};
 
 export function useSocket(boardId: string) {
   const [isConnected, setIsConnected] = useState(false);
+  const [isGenerating, setIsGenerating] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const { 
     setBoardId, 
+    setBoardName,
     setNodes, 
     setEdges, 
     addNode, 
@@ -22,7 +51,7 @@ export function useSocket(boardId: string) {
     console.log("Initializing WebSocket connection for boardId:", boardId);
     
     // Connect to WebSocket
-    const wsUrl = `ws://localhost:8000/ws/board/${boardId}/`;
+    const wsUrl = `${process.env.NEXT_PUBLIC_WS_URL}/ws/board/${boardId}/`;
     console.log("Connecting to WebSocket URL:", wsUrl);
     
     try {
@@ -79,12 +108,17 @@ export function useSocket(boardId: string) {
     switch (data.type) {
       case 'board_state':
         // Set initial board state
-        setNodes(data.nodes || []);
-        setEdges(data.edges || []);
+        setNodes((data.nodes || []).map(mapBackendNode));
+        setEdges((data.edges || []).map(mapBackendEdge));
+        if (data.board && data.board.name) {
+          setBoardName(data.board.name);
+        } else {
+          setBoardName(null);
+        }
         break;
       
       case 'node_created':
-        addNode(data.node);
+        addNode(mapBackendNode(data.node));
         break;
       
       case 'node_moved':
@@ -96,17 +130,39 @@ export function useSocket(boardId: string) {
         break;
       
       case 'edge_created':
-        addEdge(data.edge);
+        addEdge(mapBackendEdge(data.edge));
         break;
       
       case 'ai_generated':
         // Handle AI-generated content
         if (data.nodes) {
-          data.nodes.forEach((node: any) => addNode(node));
+          data.nodes.forEach((node: any, index: number) => {
+            const mappedNode = mapBackendNode(node);
+            // Space nodes 250px apart horizontally and 150px vertically in a flow pattern
+            const columns = 3;
+            const col = index % columns;
+            const row = Math.floor(index / columns);
+            
+            const newPos = {
+              x: 50 + col * 250,
+              y: 50 + row * 150
+            };
+            
+            mappedNode.position = newPos;
+            addNode(mappedNode);
+            // Sync with backend
+            moveNode(mappedNode.id, newPos);
+          });
         }
         if (data.edges) {
-          data.edges.forEach((edge: any) => addEdge(edge));
+          data.edges.forEach((edge: any) => addEdge(mapBackendEdge(edge)));
         }
+        setIsGenerating(false);
+        break;
+
+      case 'ai_error':
+        console.error('AI Generation Error:', data.error);
+        setIsGenerating(false);
         break;
       
       default:
@@ -150,6 +206,7 @@ export function useSocket(boardId: string) {
   };
 
   const generateAI = (prompt: string) => {
+    setIsGenerating(true);
     sendMessage({
       type: 'ai_generate',
       prompt: prompt
@@ -158,6 +215,7 @@ export function useSocket(boardId: string) {
 
   return {
     isConnected,
+    isGenerating,
     sendMessage,
     drawNode,
     moveNode,

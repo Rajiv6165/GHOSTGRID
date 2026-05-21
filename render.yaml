@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: ghostgrid-backend
+    env: docker
+    dockerfilePath: ghostgrid-backend/Dockerfile
+    dockerContext: ghostgrid-backend
+    plan: free
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      - key: ALLOWED_HOSTS
+        value: "*"
+      - key: CORS_ALLOWED_ORIGINS
+        value: "https://your-vercel-frontend-url.vercel.app"
+      # Optional: Add PostgreSQL and Redis connection parameters if deploying with databases
+      # - key: POSTGRES_HOST
+      #   value: ""
+      # - key: POSTGRES_DB
+      #   value: ""
+      # - key: POSTGRES_USER
+      #   value: ""
+      # - key: POSTGRES_PASSWORD
+      #   value: ""
+      # - key: REDIS_HOST
+      #   value: ""
