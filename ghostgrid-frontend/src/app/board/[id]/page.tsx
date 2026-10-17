@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams } from 'next/navigation';
 import { useBoardStore } from '../../../lib/store';
 import { useSocket } from '../../../hooks/useSocket';
@@ -75,6 +75,14 @@ export default function BoardPage() {
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
 
+  // Active Workspace Nodes Panel scroll & hidden count tracking
+  const nodesGridRef = useRef<HTMLDivElement>(null);
+  const [hiddenNodesCount, setHiddenNodesCount] = useState(0);
+  const [canScrollUp, setCanScrollUp] = useState(false);
+  const [canScrollDown, setCanScrollDown] = useState(false);
+  const prevIsGenerating = useRef(isGenerating);
+  const initialFitDone = useRef(false);
+
   // Touch state references for pan and pinch-to-zoom
   const touchStateRef = useRef<{
     initialDist: number;
@@ -100,6 +108,57 @@ export default function BoardPage() {
     nodeOrigY: 0,
     nodeId: null,
   });
+
+  // Fit to screen: automatically calculates the correct zoom level and pan position to fit all nodes within visible canvas area
+  const fitToScreen = useCallback((customNodes?: typeof nodes) => {
+    const targetNodes = customNodes || useBoardStore.getState().nodes;
+    if (!targetNodes || targetNodes.length === 0) return;
+
+    const viewport = document.getElementById('canvas-viewport');
+    if (!viewport) return;
+
+    const viewportWidth = viewport.clientWidth;
+    const viewportHeight = viewport.clientHeight;
+    if (viewportWidth <= 0 || viewportHeight <= 0) return;
+
+    const cardW = isMobile ? 140 : 200;
+    const cardH = isMobile ? 70 : 100;
+    const padding = isMobile ? 24 : 50;
+
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+
+    targetNodes.forEach((node) => {
+      minX = Math.min(minX, node.position.x);
+      maxX = Math.max(maxX, node.position.x + cardW);
+      minY = Math.min(minY, node.position.y);
+      maxY = Math.max(maxY, node.position.y + cardH);
+    });
+
+    const contentWidth = Math.max(maxX - minX, cardW);
+    const contentHeight = Math.max(maxY - minY, cardH);
+
+    const availableWidth = Math.max(viewportWidth - padding * 2, 100);
+    const availableHeight = Math.max(viewportHeight - padding * 2, 100);
+
+    const scaleX = availableWidth / contentWidth;
+    const scaleY = availableHeight / contentHeight;
+    const calculatedZoom = Math.min(scaleX, scaleY);
+
+    // Clamp zoom to reasonable limits (0.2x min, 1.0x max)
+    const newZoom = Number(Math.max(0.2, Math.min(1.0, calculatedZoom)).toFixed(2));
+
+    const centerX = (minX + maxX) / 2;
+    const centerY = (minY + maxY) / 2;
+
+    const newPanX = Math.round(viewportWidth / 2 - centerX * newZoom);
+    const newPanY = Math.round(viewportHeight / 2 - centerY * newZoom);
+
+    setZoom(newZoom);
+    setPan({ x: newPanX, y: newPanY });
+  }, [isMobile]);
 
   // Automatically set initial zoom to 60% on mobile screens (< 768px)
   useEffect(() => {
@@ -130,13 +189,92 @@ export default function BoardPage() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Close command palette when AI finishes generating
+  // Close command palette and automatically fit all nodes to screen when AI generates nodes
   useEffect(() => {
     if (waitingForAI && !isGenerating) {
       setWaitingForAI(false);
       setShowCommandPalette(false);
+      const timer = setTimeout(() => {
+        fitToScreen();
+      }, 150);
+      return () => clearTimeout(timer);
+    } else if (prevIsGenerating.current && !isGenerating) {
+      const timer = setTimeout(() => {
+        fitToScreen();
+      }, 150);
+      return () => clearTimeout(timer);
     }
-  }, [isGenerating, waitingForAI]);
+    prevIsGenerating.current = isGenerating;
+  }, [isGenerating, waitingForAI, fitToScreen]);
+
+  // Initial fit to screen when board state loads with nodes
+  useEffect(() => {
+    if (!initialFitDone.current && nodes.length > 0) {
+      initialFitDone.current = true;
+      const timer = setTimeout(() => {
+        fitToScreen();
+      }, 200);
+      return () => clearTimeout(timer);
+    }
+  }, [nodes.length, fitToScreen]);
+
+  // Update nodes panel scrolling states and hidden node count
+  const updateScrollState = useCallback(() => {
+    const container = nodesGridRef.current;
+    if (!container) return;
+
+    const { scrollTop, clientHeight, scrollHeight } = container;
+
+    setCanScrollUp(scrollTop > 4);
+    setCanScrollDown(scrollTop + clientHeight < scrollHeight - 4);
+
+    if (scrollHeight <= clientHeight + 4) {
+      setHiddenNodesCount(0);
+      return;
+    }
+
+    const containerRect = container.getBoundingClientRect();
+    const children = Array.from(container.children) as HTMLElement[];
+
+    let hidden = 0;
+    children.forEach((child) => {
+      const rect = child.getBoundingClientRect();
+      const visibleTop = Math.max(rect.top, containerRect.top);
+      const visibleBottom = Math.min(rect.bottom, containerRect.bottom);
+      const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+
+      // If less than half the card is visible in the container, count it as hidden
+      if (visibleHeight < rect.height * 0.5) {
+        hidden++;
+      }
+    });
+
+    setHiddenNodesCount(hidden);
+  }, []);
+
+  const handleScrollUp = () => {
+    if (nodesGridRef.current) {
+      nodesGridRef.current.scrollBy({ top: -140, behavior: 'smooth' });
+      setTimeout(updateScrollState, 350);
+    }
+  };
+
+  const handleScrollDown = () => {
+    if (nodesGridRef.current) {
+      nodesGridRef.current.scrollBy({ top: 140, behavior: 'smooth' });
+      setTimeout(updateScrollState, 350);
+    }
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(updateScrollState, 50);
+    return () => clearTimeout(timer);
+  }, [nodes, updateScrollState]);
+
+  useEffect(() => {
+    window.addEventListener('resize', updateScrollState);
+    return () => window.removeEventListener('resize', updateScrollState);
+  }, [updateScrollState]);
 
   const handleCommandSubmit = (cmd: string) => {
     if (cmd.startsWith('design ')) {
@@ -546,8 +684,19 @@ export default function BoardPage() {
           </div>
         </div>
 
-        {/* Zoom Controls - Minimum 44px touch target on mobile */}
-        <div className="absolute bottom-3 right-3 md:bottom-4 md:right-4 flex gap-1.5 md:gap-2 z-20 pointer-events-auto">
+        {/* Zoom Controls & Fit to Screen */}
+        <div className="absolute bottom-3 right-3 md:bottom-4 md:right-4 flex items-center gap-1.5 md:gap-2 z-20 pointer-events-auto">
+          <button 
+            onClick={() => fitToScreen()}
+            className="h-11 md:h-10 px-2.5 md:px-3 rounded bg-[#080808]/90 border border-cyber-green/50 text-cyber-green text-[10px] md:text-xs font-bold font-mono flex items-center gap-1.5 hover:bg-cyber-green hover:text-black active:bg-cyber-green active:text-black transition-colors shadow-lg touch-manipulation cursor-pointer whitespace-nowrap"
+            title="Fit to Screen"
+            aria-label="Fit to Screen"
+          >
+            <svg className="w-3.5 h-3.5 md:w-4 md:h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+            </svg>
+            <span>FIT TO SCREEN</span>
+          </button>
           <button 
             onClick={() => setZoom(z => Math.max(0.3, Number((z - 0.1).toFixed(2))))}
             className="w-11 h-11 md:w-10 md:h-10 min-w-[44px] min-h-[44px] md:min-w-0 md:min-h-0 rounded bg-[#080808]/90 border border-cyber-green/50 text-cyber-green text-xl font-bold flex items-center justify-center hover:bg-cyber-green hover:text-black active:bg-cyber-green active:text-black transition-colors shadow-lg font-mono touch-manipulation cursor-pointer"
@@ -574,8 +723,64 @@ export default function BoardPage() {
       {nodes.length > 0 && (
         <div className="hidden md:block shrink-0">
           <CyberpunkCard className="mt-6">
-            <h2 className="text-cyber-blue mb-4 font-mono font-bold uppercase tracking-wider">Active Workspace Nodes ({nodes.length})</h2>
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            <div className="flex justify-between items-center mb-4">
+              <div className="flex items-center gap-3">
+                <h2 className="text-cyber-blue font-mono font-bold uppercase tracking-wider text-sm md:text-base">
+                  Active Workspace Nodes ({nodes.length})
+                </h2>
+                {hiddenNodesCount > 0 && (
+                  <span 
+                    className="text-[10px] md:text-xs font-mono text-cyber-blue/90 bg-cyber-blue/10 border border-cyber-blue/30 px-2 py-0.5 rounded flex items-center gap-1.5 animate-pulse"
+                    title={`${hiddenNodesCount} nodes currently hidden outside the scroll view`}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full bg-cyber-blue"></span>
+                    <span>{hiddenNodesCount} {hiddenNodesCount === 1 ? 'node' : 'nodes'} hidden</span>
+                  </span>
+                )}
+              </div>
+
+              {/* Up / Down Arrow Scroll Controls */}
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={handleScrollUp}
+                  disabled={!canScrollUp}
+                  className={`p-1.5 rounded border font-mono text-xs transition-colors flex items-center justify-center ${
+                    canScrollUp
+                      ? 'border-cyber-green/50 text-cyber-green hover:bg-cyber-green hover:text-black cursor-pointer shadow-sm'
+                      : 'border-gray-800 text-gray-600 cursor-not-allowed opacity-30'
+                  }`}
+                  title="Scroll Up"
+                  aria-label="Scroll Up"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="18 15 12 9 6 15" />
+                  </svg>
+                </button>
+                <button
+                  onClick={handleScrollDown}
+                  disabled={!canScrollDown}
+                  className={`p-1.5 rounded border font-mono text-xs transition-colors flex items-center justify-center ${
+                    canScrollDown
+                      ? 'border-cyber-green/50 text-cyber-green hover:bg-cyber-green hover:text-black cursor-pointer shadow-sm'
+                      : 'border-gray-800 text-gray-600 cursor-not-allowed opacity-30'
+                  }`}
+                  title="Scroll Down"
+                  aria-label="Scroll Down"
+                >
+                  <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Scrollable nodes grid container with fixed height 200px and overflow-y: auto */}
+            <div 
+              ref={nodesGridRef}
+              onScroll={updateScrollState}
+              className="h-[200px] overflow-y-auto pr-2 grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 content-start"
+              style={{ height: '200px', overflowY: 'auto' }}
+            >
               {nodes.map((node) => {
                 const accentColor = getAccentColor(node.type);
                 return (
@@ -608,6 +813,14 @@ export default function BoardPage() {
                 );
               })}
             </div>
+
+            {/* Subtle bottom scroll indicator */}
+            {hiddenNodesCount > 0 && canScrollDown && (
+              <div className="mt-2 pt-1 border-t border-cyber-green/10 flex justify-between items-center text-[10px] text-gray-500 font-mono">
+                <span>Scroll down or use arrows for more nodes</span>
+                <span className="text-cyber-blue font-bold">↓ {hiddenNodesCount} {hiddenNodesCount === 1 ? 'node' : 'nodes'} hidden</span>
+              </div>
+            )}
           </CyberpunkCard>
         </div>
       )}
