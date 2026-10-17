@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'next/navigation';
 import { useBoardStore } from '../../../lib/store';
 import { useSocket } from '../../../hooks/useSocket';
@@ -19,13 +19,15 @@ const getAccentColor = (type: string) => {
   }
 };
 
-const getIntersectionPoint = (source: {x: number, y: number}, target: {x: number, y: number}) => {
-  const w = 200;
-  const h = 80;
-  const x1 = source.x + 100;
-  const y1 = source.y + 40;
-  const x2 = target.x + 100;
-  const y2 = target.y + 40;
+const getIntersectionPoint = (source: {x: number, y: number}, target: {x: number, y: number}, isMobile = false) => {
+  const w = isMobile ? 140 : 200;
+  const h = isMobile ? 60 : 80;
+  const halfW = w / 2;
+  const halfH = h / 2;
+  const x1 = source.x + halfW;
+  const y1 = source.y + halfH;
+  const x2 = target.x + halfW;
+  const y2 = target.y + halfH;
   
   const dx = x2 - x1;
   const dy = y2 - y1;
@@ -38,12 +40,12 @@ const getIntersectionPoint = (source: {x: number, y: number}, target: {x: number
   const absDy = Math.abs(dy);
   
   let scale = 1;
-  if (absDx * (h / 2) > absDy * (w / 2)) {
+  if (absDx * halfH > absDy * halfW) {
     // Intersects left/right side
-    scale = (w / 2) / absDx;
+    scale = halfW / absDx;
   } else {
     // Intersects top/bottom side
-    scale = (h / 2) / absDy;
+    scale = halfH / absDy;
   }
   
   const offsetScale = scale - (12 / Math.sqrt(dx * dx + dy * dy));
@@ -64,11 +66,56 @@ export default function BoardPage() {
   const [showCommandPalette, setShowCommandPalette] = useState(false);
   const [waitingForAI, setWaitingForAI] = useState(false);
 
+  // Mobile detection
+  const [isMobile, setIsMobile] = useState(false);
+
   // Panning & Zooming Canvas State
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+
+  // Touch state references for pan and pinch-to-zoom
+  const touchStateRef = useRef<{
+    initialDist: number;
+    initialZoom: number;
+    touchStartPos: { x: number; y: number };
+  }>({
+    initialDist: 0,
+    initialZoom: 1,
+    touchStartPos: { x: 0, y: 0 },
+  });
+
+  // Touch drag tracking for individual nodes
+  const nodeTouchRef = useRef<{
+    startX: number;
+    startY: number;
+    nodeOrigX: number;
+    nodeOrigY: number;
+    nodeId: string | null;
+  }>({
+    startX: 0,
+    startY: 0,
+    nodeOrigX: 0,
+    nodeOrigY: 0,
+    nodeId: null,
+  });
+
+  // Automatically set initial zoom to 60% on mobile screens (< 768px)
+  useEffect(() => {
+    const isMobileScreen = window.innerWidth < 768;
+    setIsMobile(isMobileScreen);
+    if (isMobileScreen) {
+      setZoom(0.6);
+    }
+
+    const handleResize = () => {
+      setIsMobile(window.innerWidth < 768);
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   // Handle keyboard shortcut for command palette
   useEffect(() => {
@@ -121,15 +168,52 @@ export default function BoardPage() {
     const viewport = document.getElementById('canvas-viewport');
     const rect = viewport?.getBoundingClientRect();
     if (rect && e.clientX !== 0 && e.clientY !== 0) {
-      // Convert screen coordinates to canvas local coordinates taking pan/zoom into account
       const localX = (e.clientX - rect.left - pan.x) / zoom;
       const localY = (e.clientY - rect.top - pan.y) / zoom;
       
-      // Center the node card (200px wide, 80px tall)
-      handleNodeDrag(nodeId, Math.round(localX - 100), Math.round(localY - 40));
+      const cardW = isMobile ? 140 : 200;
+      const cardH = isMobile ? 60 : 80;
+      handleNodeDrag(nodeId, Math.round(localX - cardW / 2), Math.round(localY - cardH / 2));
     }
   };
 
+  // Node touch drag handlers for mobile devices
+  const handleNodeTouchStart = (e: React.TouchEvent, node: { id: string; position: { x: number; y: number } }) => {
+    if (e.touches.length !== 1) return;
+    e.stopPropagation();
+    const touch = e.touches[0];
+    nodeTouchRef.current = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      nodeOrigX: node.position.x,
+      nodeOrigY: node.position.y,
+      nodeId: node.id,
+    };
+  };
+
+  const handleNodeTouchMove = (e: React.TouchEvent, nodeId: string) => {
+    if (nodeTouchRef.current.nodeId !== nodeId || e.touches.length !== 1) return;
+    e.stopPropagation();
+    const touch = e.touches[0];
+    const dx = (touch.clientX - nodeTouchRef.current.startX) / zoom;
+    const dy = (touch.clientY - nodeTouchRef.current.startY) / zoom;
+    const newX = Math.round(nodeTouchRef.current.nodeOrigX + dx);
+    const newY = Math.round(nodeTouchRef.current.nodeOrigY + dy);
+    updateNodePosition(nodeId, { x: newX, y: newY });
+  };
+
+  const handleNodeTouchEnd = (e: React.TouchEvent, nodeId: string) => {
+    if (nodeTouchRef.current.nodeId === nodeId) {
+      e.stopPropagation();
+      nodeTouchRef.current.nodeId = null;
+      const node = nodes.find(n => n.id === nodeId);
+      if (node) {
+        moveNode(nodeId, { x: node.position.x, y: node.position.y });
+      }
+    }
+  };
+
+  // Canvas Mouse Pan Handlers
   const handleCanvasMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     const isBackground = 
@@ -156,8 +240,67 @@ export default function BoardPage() {
     setIsDragging(false);
   };
 
+  // Canvas Touch Handlers (1-finger Pan & 2-finger Pinch to Zoom)
+  const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length === 1) {
+      const touch = e.touches[0];
+      touchStateRef.current.touchStartPos = {
+        x: touch.clientX - pan.x,
+        y: touch.clientY - pan.y,
+      };
+      setIsDragging(true);
+    } else if (e.touches.length === 2) {
+      setIsDragging(false);
+      const touch1 = e.touches[0];
+      const touch2 = e.touches[1];
+      const dist = Math.hypot(
+        touch2.clientX - touch1.clientX,
+        touch2.clientY - touch1.clientY
+      );
+      touchStateRef.current.initialDist = dist;
+      touchStateRef.current.initialZoom = zoom;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length === 1 && isDragging) {
+      const touch = e.touches[0];
+      setPan({
+        x: touch.clientX - touchStateRef.current.touchStartPos.x,
+        y: touch.clientY - touchStateRef.current.touchStartPos.y,
+      });
+    } else if (e.touches.length === 2) {
+      const touch1 = e.touches[0];
+      const touch2 = e.touches[1];
+      const currentDist = Math.hypot(
+        touch2.clientX - touch1.clientX,
+        touch2.clientY - touch1.clientY
+      );
+      if (touchStateRef.current.initialDist > 0) {
+        const factor = currentDist / touchStateRef.current.initialDist;
+        const newZoom = Math.min(2.5, Math.max(0.3, touchStateRef.current.initialZoom * factor));
+        setZoom(Number(newZoom.toFixed(2)));
+      }
+    }
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent<HTMLDivElement>) => {
+    if (e.touches.length === 0) {
+      setIsDragging(false);
+      touchStateRef.current.initialDist = 0;
+    } else if (e.touches.length === 1) {
+      const touch = e.touches[0];
+      touchStateRef.current.touchStartPos = {
+        x: touch.clientX - pan.x,
+        y: touch.clientY - pan.y,
+      };
+      setIsDragging(true);
+      touchStateRef.current.initialDist = 0;
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-cyber-dark text-cyber-green p-4">
+    <div className="min-h-screen h-[100dvh] md:h-auto bg-cyber-dark text-cyber-green p-2 md:p-4 flex flex-col overflow-hidden md:overflow-visible">
       {/* CSS Animations */}
       <style dangerouslySetInnerHTML={{ __html: `
         @keyframes dash-flow {
@@ -177,51 +320,55 @@ export default function BoardPage() {
         }
       `}} />
 
-      {/* Header */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6 border-b border-cyber-green/20 pb-4">
-        <div>
-          <h1 className="text-2xl md:text-3xl font-black text-cyber-green uppercase tracking-wider font-mono">
+      {/* Header / Responsive Top Bar */}
+      <div className="flex justify-between items-center gap-2 mb-2 md:mb-6 border-b border-cyber-green/20 pb-2 md:pb-4 shrink-0">
+        <div className="min-w-0 flex-1">
+          <h1 className="text-base sm:text-2xl md:text-3xl font-black text-cyber-green uppercase tracking-wider font-mono truncate">
             {boardName || 'GHOSTGRID BOARD'}
           </h1>
-          <div className="text-xs text-gray-500 font-mono mt-1 flex flex-wrap items-center gap-2">
-            <span>ID: <span className="text-cyber-blue select-all">{boardId}</span></span>
-            <span className="hidden sm:inline">•</span>
-            <span>NODES: <span className="text-cyber-green font-bold">{nodes.length}</span></span>
-            <span className="hidden sm:inline">•</span>
-            <span>EDGES: <span className="text-cyber-green font-bold">{edges.length}</span></span>
+          <div className="text-[10px] md:text-xs text-gray-500 font-mono mt-0.5 md:mt-1 flex flex-wrap items-center gap-1.5 md:gap-2">
+            <span>ID: <span className="text-cyber-blue select-all font-mono">
+              <span className="md:hidden">{boardId ? `${boardId.slice(0, 8)}…` : ''}</span>
+              <span className="hidden md:inline">{boardId}</span>
+            </span></span>
+            <span className="hidden md:inline">•</span>
+            <span className="hidden md:inline">NODES: <span className="text-cyber-green font-bold">{nodes.length}</span></span>
+            <span className="hidden md:inline">•</span>
+            <span className="hidden md:inline">EDGES: <span className="text-cyber-green font-bold">{edges.length}</span></span>
           </div>
         </div>
-        <div className="flex gap-4 items-center">
-          <div className={`px-3 py-1 rounded text-xs font-bold tracking-widest font-mono flex items-center gap-1.5 ${isConnected ? 'bg-cyber-green/10 text-cyber-green border border-cyber-green/30' : 'bg-cyber-red/10 text-cyber-red border border-cyber-red/30'}`}>
-            <span className={`w-2.5 h-2.5 rounded-full ${isConnected ? 'bg-cyber-green animate-ping' : 'bg-cyber-red'}`}></span>
+        <div className="flex gap-2 md:gap-4 items-center shrink-0">
+          <div className={`px-2 md:px-3 py-1 rounded text-[10px] md:text-xs font-bold tracking-wider md:tracking-widest font-mono flex items-center gap-1.5 ${isConnected ? 'bg-cyber-green/10 text-cyber-green border border-cyber-green/30' : 'bg-cyber-red/10 text-cyber-red border border-cyber-red/30'}`}>
+            <span className={`w-2 h-2 md:w-2.5 md:h-2.5 rounded-full ${isConnected ? 'bg-cyber-green animate-ping' : 'bg-cyber-red'}`}></span>
             {isConnected ? 'ONLINE' : 'OFFLINE'}
           </div>
           <button 
             onClick={() => setShowCommandPalette(true)}
-            className="px-4 py-2 border border-cyber-purple/50 text-cyber-purple hover:bg-cyber-purple hover:text-black hover:border-cyber-purple font-mono text-xs font-bold tracking-widest transition-all duration-300"
+            className="px-2.5 py-1.5 md:px-4 md:py-2 border border-cyber-purple/50 text-cyber-purple hover:bg-cyber-purple hover:text-black hover:border-cyber-purple font-mono text-[10px] md:text-xs font-bold tracking-wider md:tracking-widest transition-all duration-300 rounded"
           >
-            COMMAND PALETTE (CTRL+K)
+            <span className="hidden md:inline">COMMAND PALETTE (CTRL+K)</span>
+            <span className="md:hidden">CMD+K</span>
           </button>
         </div>
       </div>
 
       {/* Command Palette */}
       {showCommandPalette && (
-        <CyberpunkCard className="mb-6 relative overflow-hidden">
+        <CyberpunkCard className="mb-2 md:mb-6 relative overflow-hidden shrink-0">
           {isGenerating ? (
-            <div className="flex flex-col items-center justify-center py-8">
-              <div className="w-12 h-12 border-4 border-cyber-green border-t-transparent rounded-full animate-spin mb-4"></div>
-              <div className="text-cyber-green font-bold tracking-widest animate-pulse font-mono">
+            <div className="flex flex-col items-center justify-center py-6 md:py-8">
+              <div className="w-10 h-10 md:w-12 md:h-12 border-4 border-cyber-green border-t-transparent rounded-full animate-spin mb-3 md:mb-4"></div>
+              <div className="text-cyber-green text-xs md:text-base font-bold tracking-widest animate-pulse font-mono">
                 AI GENERATING...
               </div>
             </div>
           ) : (
             <>
-              <div className="mb-4">
-                <h2 className="text-cyber-blue font-mono font-bold text-lg uppercase tracking-widest">AI ARCHITECT</h2>
-                <p className="text-xs text-gray-500 font-mono">Describe your system and I will generate the architecture</p>
+              <div className="mb-3 md:mb-4">
+                <h2 className="text-cyber-blue font-mono font-bold text-sm md:text-lg uppercase tracking-widest">AI ARCHITECT</h2>
+                <p className="text-[10px] md:text-xs text-gray-500 font-mono">Describe your system and I will generate the architecture</p>
               </div>
-              <div className="flex flex-wrap gap-2 mb-4">
+              <div className="flex flex-wrap gap-1.5 md:gap-2 mb-3 md:mb-4">
                 {[
                   "Design a Netflix clone",
                   "Design an e-commerce platform",
@@ -232,7 +379,7 @@ export default function BoardPage() {
                   <button
                     key={suggestion}
                     onClick={() => setCommand(suggestion.toLowerCase())}
-                    className="px-3 py-1.5 border border-cyber-blue/30 text-cyber-blue/80 hover:text-cyber-blue hover:border-cyber-blue hover:bg-cyber-blue/10 rounded-full font-mono text-[10px] font-bold uppercase tracking-wider transition-all duration-200 cursor-pointer"
+                    className="px-2.5 py-1 md:px-3 md:py-1.5 border border-cyber-blue/30 text-cyber-blue/80 hover:text-cyber-blue hover:border-cyber-blue hover:bg-cyber-blue/10 rounded-full font-mono text-[9px] md:text-[10px] font-bold uppercase tracking-wider transition-all duration-200 cursor-pointer"
                   >
                     {suggestion}
                   </button>
@@ -244,7 +391,7 @@ export default function BoardPage() {
                 onEnter={handleCommandSubmit}
                 placeholder="What would you like to build today?"
               />
-              <div className="mt-4 text-xs text-cyber-gray font-mono">
+              <div className="mt-3 md:mt-4 text-[10px] md:text-xs text-cyber-gray font-mono hidden sm:block">
                 <p className="text-gray-500 font-bold mb-1 uppercase tracking-wider">Command Protocols:</p>
                 <p className="text-cyber-blue">- design [prompt] <span className="text-gray-600">-- Generate architecture with AI</span></p>
                 <p className="text-cyber-blue">- add [type] <span className="text-gray-600">-- Add node (service, database, cache, api, queue, gateway)</span></p>
@@ -254,14 +401,17 @@ export default function BoardPage() {
         </CyberpunkCard>
       )}
 
-      {/* Board Canvas */}
+      {/* Board Canvas - Fits full mobile viewport height */}
       <div 
         id="canvas-viewport"
-        className="h-[70vh] relative overflow-hidden bg-[#050505] border border-cyber-green/20 rounded-xl cursor-grab active:cursor-grabbing backdrop-blur-md"
+        className="flex-1 h-full min-h-[350px] md:h-[75vh] md:min-h-0 relative overflow-hidden bg-[#050505] border border-cyber-green/20 rounded-xl cursor-grab active:cursor-grabbing backdrop-blur-md touch-none select-none"
         onMouseDown={handleCanvasMouseDown}
         onMouseMove={handleCanvasMouseMove}
         onMouseUp={handleCanvasMouseUp}
         onMouseLeave={handleCanvasMouseUp}
+        onTouchStart={handleTouchStart}
+        onTouchMove={handleTouchMove}
+        onTouchEnd={handleTouchEnd}
         onDragOver={(e) => e.preventDefault()}
       >
         {/* Workspace Canvas (Scales and Translates) */}
@@ -297,9 +447,11 @@ export default function BoardPage() {
                 const sourceNode = nodes.find(n => n.id === edge.source);
                 const targetNode = nodes.find(n => n.id === edge.target);
                 if (sourceNode && targetNode) {
-                  const startX = sourceNode.position.x + 100;
-                  const startY = sourceNode.position.y + 40;
-                  const endPoint = getIntersectionPoint(sourceNode.position, targetNode.position);
+                  const cardW = isMobile ? 140 : 200;
+                  const cardH = isMobile ? 60 : 80;
+                  const startX = sourceNode.position.x + cardW / 2;
+                  const startY = sourceNode.position.y + cardH / 2;
+                  const endPoint = getIntersectionPoint(sourceNode.position, targetNode.position, isMobile);
                   return (
                     <g key={edge.id}>
                       <line
@@ -331,13 +483,13 @@ export default function BoardPage() {
               })}
             </svg>
 
-            {/* Nodes */}
+            {/* Nodes - Responsive: 140px on mobile, 200px on desktop, smaller font (11px) and padding (8px) on mobile */}
             {nodes.map((node) => {
               const accentColor = getAccentColor(node.type);
               return (
                 <div
                   key={node.id}
-                  className="absolute bg-[#080808]/95 border-2 rounded-lg p-4 cursor-move w-[200px] h-auto text-left shadow-lg select-none pointer-events-auto"
+                  className="absolute bg-[#080808]/95 border-2 rounded-lg cursor-move text-left shadow-lg select-none pointer-events-auto touch-none w-[140px] md:w-[200px] p-2 md:p-4"
                   style={{
                     left: `${node.position.x}px`,
                     top: `${node.position.y}px`,
@@ -346,24 +498,32 @@ export default function BoardPage() {
                   }}
                   draggable
                   onDragEnd={(e) => handleNodeDragEnd(e, node.id)}
+                  onTouchStart={(e) => handleNodeTouchStart(e, node)}
+                  onTouchMove={(e) => handleNodeTouchMove(e, node.id)}
+                  onTouchEnd={(e) => handleNodeTouchEnd(e, node.id)}
                 >
-                  <div className="flex justify-between items-start gap-2 mb-1.5">
-                    <span className="text-[9px] uppercase font-bold tracking-widest px-1.5 py-0.5 rounded bg-black/40" style={{ color: accentColor }}>
+                  <div className="flex justify-between items-start gap-1 md:gap-2 mb-1 md:mb-1.5">
+                    <span 
+                      className="text-[8px] md:text-[9px] uppercase font-bold tracking-wider md:tracking-widest px-1 md:px-1.5 py-0.5 rounded bg-black/40" 
+                      style={{ color: accentColor }}
+                    >
                       {node.type}
                     </span>
                     <button
-                      onClick={() => {
+                      onClick={(e) => {
+                        e.stopPropagation();
                         deleteNode(node.id);
                         deleteNodeMessage(node.id);
                       }}
-                      className="text-gray-500 hover:text-cyber-red text-sm leading-none transition-colors"
+                      onTouchStart={(e) => e.stopPropagation()}
+                      className="text-gray-500 hover:text-cyber-red text-xs md:text-sm leading-none transition-colors p-0.5"
                     >
                       ×
                     </button>
                   </div>
-                  <div className="font-bold text-white text-sm break-words">{node.data.label}</div>
+                  <div className="font-bold text-white text-[11px] md:text-sm break-words leading-tight">{node.data.label}</div>
                   {node.data.description && (
-                    <div className="text-[10px] text-gray-400 mt-1 line-clamp-2 leading-tight">
+                    <div className="text-[9px] md:text-[10px] text-gray-400 mt-1 line-clamp-2 leading-tight">
                       {node.data.description}
                     </div>
                   )}
@@ -374,11 +534,11 @@ export default function BoardPage() {
             {/* Empty State */}
             {nodes.length === 0 && (
               <div id="canvas-empty-state" className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="text-center bg-black/50 p-8 border border-cyber-green/10 rounded-xl backdrop-blur-sm pointer-events-auto">
-                  <div className="text-6xl mb-4 animate-bounce">👻</div>
-                  <p className="text-cyber-blue mb-2 font-mono uppercase font-bold tracking-widest">No nodes in database</p>
-                  <p className="text-xs text-cyber-gray font-mono">
-                    Press <kbd className="px-1.5 py-0.5 bg-cyber-gray text-black rounded text-[10px] font-bold">CTRL+K</kbd> to open Command Palette
+                <div className="text-center bg-black/50 p-6 md:p-8 border border-cyber-green/10 rounded-xl backdrop-blur-sm pointer-events-auto">
+                  <div className="text-4xl md:text-6xl mb-3 md:mb-4 animate-bounce">👻</div>
+                  <p className="text-cyber-blue mb-1 md:mb-2 font-mono uppercase font-bold tracking-widest text-xs md:text-base">No nodes in database</p>
+                  <p className="text-[10px] md:text-xs text-cyber-gray font-mono">
+                    Tap <button onClick={() => setShowCommandPalette(true)} className="px-1.5 py-0.5 bg-cyber-gray text-black rounded text-[10px] font-bold">CMD+K</button> to open Command Palette
                   </p>
                 </div>
               </div>
@@ -386,66 +546,70 @@ export default function BoardPage() {
           </div>
         </div>
 
-        {/* Zoom Controls (Static HUD element) */}
-        <div className="absolute bottom-4 right-4 flex gap-2 z-20 pointer-events-auto">
+        {/* Zoom Controls - Minimum 44px touch target on mobile */}
+        <div className="absolute bottom-3 right-3 md:bottom-4 md:right-4 flex gap-1.5 md:gap-2 z-20 pointer-events-auto">
           <button 
-            onClick={() => setZoom(z => Math.max(0.5, z - 0.1))}
-            className="w-10 h-10 rounded bg-[#080808]/90 border border-cyber-green/50 text-cyber-green text-xl font-bold flex items-center justify-center hover:bg-cyber-green hover:text-black transition-colors shadow-lg font-mono"
+            onClick={() => setZoom(z => Math.max(0.3, Number((z - 0.1).toFixed(2))))}
+            className="w-11 h-11 md:w-10 md:h-10 min-w-[44px] min-h-[44px] md:min-w-0 md:min-h-0 rounded bg-[#080808]/90 border border-cyber-green/50 text-cyber-green text-xl font-bold flex items-center justify-center hover:bg-cyber-green hover:text-black active:bg-cyber-green active:text-black transition-colors shadow-lg font-mono touch-manipulation cursor-pointer"
             title="Zoom Out"
+            aria-label="Zoom Out"
           >
             -
           </button>
-          <div className="w-16 h-10 rounded bg-[#080808]/90 border border-cyber-green/30 text-cyber-green text-xs font-mono font-bold flex items-center justify-center shadow-lg">
+          <div className="min-w-[50px] h-11 md:w-16 md:h-10 md:min-w-0 px-2 rounded bg-[#080808]/90 border border-cyber-green/30 text-cyber-green text-xs font-mono font-bold flex items-center justify-center shadow-lg select-none">
             {Math.round(zoom * 100)}%
           </div>
           <button 
-            onClick={() => setZoom(z => Math.min(2, z + 0.1))}
-            className="w-10 h-10 rounded bg-[#080808]/90 border border-cyber-green/50 text-cyber-green text-xl font-bold flex items-center justify-center hover:bg-cyber-green hover:text-black transition-colors shadow-lg font-mono"
+            onClick={() => setZoom(z => Math.min(2.5, Number((z + 0.1).toFixed(2))))}
+            className="w-11 h-11 md:w-10 md:h-10 min-w-[44px] min-h-[44px] md:min-w-0 md:min-h-0 rounded bg-[#080808]/90 border border-cyber-green/50 text-cyber-green text-xl font-bold flex items-center justify-center hover:bg-cyber-green hover:text-black active:bg-cyber-green active:text-black transition-colors shadow-lg font-mono touch-manipulation cursor-pointer"
             title="Zoom In"
+            aria-label="Zoom In"
           >
             +
           </button>
         </div>
       </div>
 
-      {/* Node list panel */}
+      {/* Active Workspace Nodes Panel - Hidden on mobile (< 768px) to save screen space */}
       {nodes.length > 0 && (
-        <CyberpunkCard className="mt-6">
-          <h2 className="text-cyber-blue mb-4 font-mono font-bold uppercase tracking-wider">Active Workspace Nodes ({nodes.length})</h2>
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-            {nodes.map((node) => {
-              const accentColor = getAccentColor(node.type);
-              return (
-                <div 
-                  key={node.id} 
-                  className="bg-[#080808]/90 border rounded-lg p-3 flex flex-col justify-between"
-                  style={{ borderColor: `${accentColor}40` }}
-                >
-                  <div className="flex justify-between items-start gap-2">
-                    <div>
-                      <div className="font-bold text-white text-sm break-all">{node.data.label}</div>
-                      <span className="text-[9px] uppercase font-bold tracking-widest" style={{ color: accentColor }}>
-                        {node.type}
-                      </span>
+        <div className="hidden md:block shrink-0">
+          <CyberpunkCard className="mt-6">
+            <h2 className="text-cyber-blue mb-4 font-mono font-bold uppercase tracking-wider">Active Workspace Nodes ({nodes.length})</h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+              {nodes.map((node) => {
+                const accentColor = getAccentColor(node.type);
+                return (
+                  <div 
+                    key={node.id} 
+                    className="bg-[#080808]/90 border rounded-lg p-3 flex flex-col justify-between"
+                    style={{ borderColor: `${accentColor}40` }}
+                  >
+                    <div className="flex justify-between items-start gap-2">
+                      <div>
+                        <div className="font-bold text-white text-sm break-all">{node.data.label}</div>
+                        <span className="text-[9px] uppercase font-bold tracking-widest" style={{ color: accentColor }}>
+                          {node.type}
+                        </span>
+                      </div>
+                      <button
+                        onClick={() => {
+                          deleteNode(node.id);
+                          deleteNodeMessage(node.id);
+                        }}
+                        className="text-gray-500 hover:text-cyber-red transition-colors text-sm font-mono font-bold"
+                      >
+                        REMOVE
+                      </button>
                     </div>
-                    <button
-                      onClick={() => {
-                        deleteNode(node.id);
-                        deleteNodeMessage(node.id);
-                      }}
-                      className="text-gray-500 hover:text-cyber-red transition-colors text-sm font-mono font-bold"
-                    >
-                      REMOVE
-                    </button>
+                    <div className="text-[10px] text-gray-500 font-mono mt-2">
+                      COORDS: ({Math.round(node.position.x)}, {Math.round(node.position.y)})
+                    </div>
                   </div>
-                  <div className="text-[10px] text-gray-500 font-mono mt-2">
-                    COORDS: ({Math.round(node.position.x)}, {Math.round(node.position.y)})
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </CyberpunkCard>
+                );
+              })}
+            </div>
+          </CyberpunkCard>
+        </div>
       )}
     </div>
   );
